@@ -1,70 +1,78 @@
-// TODO don't let user use Mainnet
+// FIXME don't let user use Mainnet: at the moment, each function that could interact with mainnet, including spending Ether, is surrounded by an if statement to guard against use of mainnet. Having to manually surrounding each function like this is error-prone. Ideally, the application that calls the functions in this file via app.ports should sense what network it's on and not call those functions if it's on mainnet.
 
 import babel_polyfill from "babel-polyfill"; // TODO move into configuration file (it's only here because I've chosen to use ES2015+)
 import Web3 from "web3";
 import abi from "./Y_sol_Y.abi"; // FIXME manual build step: having to rename ABI file extension to .abi.json by hand
 
-const web3 = new Web3(Web3.givenProvider || "http://localhost:8545"); // from web3 v1 docs
+const web3 = new Web3(Web3.givenProvider); // from web3 v1 docs
 
 const address = "0xF4C3aC68Af170E71D2CDFcd3e04964053827A2f8"; // contract address on Rinkeby, deployed from 0xa751fDbcBE2c6Cdcb9aCa517789C3974f930587c
 
-// User chooses which account will be the payee's account by it being the one that calls setNumAndDenom first.
+app.ports.haveMetaMask.subscribe(
+  () => app.ports.hasMetaMask.send(true) // FIXME detect MetaMask
+);
 
 app.ports.setPercent.subscribe(async percent => {
   const contract = new web3.eth.Contract(abi, address);
   const accounts = await web3.eth.getAccounts();
   const payee = accounts[0];
   if ((await web3.eth.net.getNetworkType()) !== "main") {
-    try {
-      await contract.methods.setNumAndDenom(percent, 100).send({ from: payee }); // FIXME not 100, percent -> rational // FIXME this is trusting that percent will be an integer (it's a float coming from Elm) and valid (Elm's doing this at the moment). // TODO setNum, setDenom or setNumAndDenom
-      app.ports.payeeAddress.send(payee);
-    } catch (e) {
-      console.error(e);
-    }
+    contract.methods
+      .setNumAndDenom(percent, 100) // FIXME major not 100, percent -> rational // FIXME this is trusting that percent will be an integer (it's a float coming from Elm) and valid (Elm's doing this at the moment). // TODO setNum, setDenom or setNumAndDenom
+      .send({ from: payee }) // User chooses which account will be the payee's account by it being the one that calls setNumAndDenom first.
+      .on("transactionHash", _ => app.ports.payeeAddress.send(payee)) // FIXME test-ether: Why is txHash being used to determine payee's address? Payee becomes payee when they set a % on the contract, therefore on receipt.
+      .on("receipt", _ => app.ports.percentSet.send(null))
+      .error(console.error);
+  } else {
+    console.error("You're on the main network."); // FIXME Put this error on the page: send it to Elm (percentSet : Maybe (https://guide.elm-lang.org/interop/javascript.html)).
+  }
+});
+
+app.ports.payerGetPercent.subscribe(async payee => {
+  const contract = new web3.eth.Contract(abi, address);
+  const numAndDenom = await Promise.all([
+    contract.methods
+      .nums(payee)
+      .call() /*,
+    contract.methods.denoms(payee).call()*/ // NOTE two calls here (denoms commented out for now as result not used). Does using a struct for num and denom (one call) cost more gas to set? UPDATE: It doesn't matter, it's about whether payAndDonate is cheaper or not, as that's the most frequent.
+  ]);
+  app.ports.percentGot.send(numAndDenom[0]); // FIXME major assumes denom is always 100
+});
+
+app.ports.getBalances.subscribe(async ({ payee, donees }) => {
+  if ((await web3.eth.net.getNetworkType()) !== "main") {
+    const balances = (await Promise.all(
+      [web3.eth.getBalance(payee)].concat(
+        donees.map(donee => web3.eth.getBalance(donee))
+      )
+    )).map(balance => web3.utils.fromWei(balance, "ether"));
+    app.ports.balances.send({
+      payee: balances[0],
+      doneeBalances: balances.slice(1)
+    });
   } else {
     console.error("You're on the main network.");
   }
 });
 
-app.ports.getBalances.subscribe(async ({ payee, donees }) => {
-  const balances = (await Promise.all(
-    [web3.eth.getBalance(payee)].concat(
-      donees.map(donee => web3.eth.getBalance(donee))
-    )
-  )).map(balance => web3.utils.fromWei(balance, "ether"));
-  app.ports.balances.send({
-    payee: balances[0],
-    doneeBalances: balances.slice(1)
-  });
-});
-
-// app.ports.setPercentAgain.subscribe(async ({ percent, payee }) => {
-//   // check for mainnet
-//   try {
-//     await contract.methods.setNumAndDenom(percent, 100).send({ from: payee }); // FIXME not 100, percent -> rational // FIXME this is trusting that percent will be an integer (it's a float coming from Elm) and valid (Elm's doing this at the moment). // TODO setNum, setDenom or setNumAndDenom
-//     app.ports.payeeAddress.send(payee);
-//   } catch (e) {
-//     console.error(e);
-//   }
-// });
-
 app.ports.pay.subscribe(async ({ payment, payee, donee }) => {
   const contract = new web3.eth.Contract(abi, address);
   const accounts = await web3.eth.getAccounts();
-  const payer = accounts[0]; // FIXME assumes user has switched accounts in MetaMask before paying. Only let user pay if active account in MetaMask isn't the payee's
+  const payer = accounts[0];
   if (payer !== payee) {
     // stops user paying from payee's account
     if ((await web3.eth.net.getNetworkType()) !== "main") {
       contract.methods
         .payAndDonate(payee, donee)
         .send({ from: payer, value: web3.utils.toWei(payment, "ether") })
-        .on("transactionHash", hash => app.ports.paid.send(hash))
+        // .on("receipt", _ => app.ports.paid.send(null))
+        // When you get a receipt it says that you sent x wei to address y (the contract) with the payee's address in tow (the input data). You don't get a receipt until the transaction has been accepted. So what's the point of confirmations after that? What can go wrong after a receipt? A receipt is a "proof of payment", right?
+        .on("confirmation", _ => app.ports.paid.send(null))
         .on("error", console.error);
-      // FIXME the donee's balances haven't always gone up by the time the paid port is called, so the balances on the screen don't go up after a payment.
     } else {
       console.error("You're on the main network.");
     }
   } else {
-    console.error("The payer and payee are the same");
+    console.error("The payer and payee are the same.");
   }
 });
