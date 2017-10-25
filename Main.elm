@@ -2,7 +2,6 @@
 -- if the donees' addresses accumulate test Ether, turn them into faucets for the demo
 -- take your cues for what should be shown instead of the balances by looking at the test Ether transactions. if payer balance is shown, it must be the user's payer account balance.
 -- user must experience being payee (set donation percent), so must have help getting accounts set up.
--- to change donation percent, e.g. after payer has already paid, user must be using payee's account.
 
 
 port module Main exposing (..)
@@ -28,16 +27,12 @@ type alias Donee =
     { name : String, balance : Float, address : String }
 
 
-type PaidOrNot
-    = HasPaid
-    | NotPaid
-
-
 type View
     = Payee
     | EtherOrNot
+    | SwitchToPayee
     | Payer
-    | All PaidOrNot
+    | All
 
 
 type alias Model =
@@ -51,6 +46,7 @@ type alias Model =
     , balances : { payer : Float, payee : Float }
     , view : View
     , ether : Maybe Bool
+    , settingPercent : Bool
     , paying : Bool
     }
 
@@ -67,12 +63,9 @@ model =
     , balances = { payer = 100, payee = 0 }
     , view = Payee
     , ether = Nothing
+    , settingPercent = False
     , paying = False
     }
-
-
-
--- FIXME Decimal, not Float for setPercent
 
 
 port haveMetaMask : () -> Cmd msg
@@ -81,7 +74,16 @@ port haveMetaMask : () -> Cmd msg
 port hasMetaMask : (Bool -> msg) -> Sub msg
 
 
+port getAccount : () -> Cmd msg
+
+
+port accountGot : (String -> msg) -> Sub msg
+
+
 port setPercent : Float -> Cmd msg
+
+
+port settingPercent : (() -> msg) -> Sub msg
 
 
 port getBalances : { payee : String, donees : List String } -> Cmd msg
@@ -91,6 +93,9 @@ port balances : ({ payee : String, doneeBalances : List String } -> msg) -> Sub 
 
 
 port pay : { payment : Float, donee : String, payee : String } -> Cmd msg
+
+
+port paying : (() -> msg) -> Sub msg
 
 
 port paid : (() -> msg) -> Sub msg
@@ -111,9 +116,12 @@ port percentGot : (String -> msg) -> Sub msg
 subscriptions model =
     Sub.batch
         [ hasMetaMask HasMetaMask
+        , accountGot AccountGot
         , payeeAddress PayeeAddress
+        , paying Paying
         , paid Paid
         , balances Balances
+        , settingPercent SettingPercent
         , percentSet PercentSet
         , percentGot PercentGot
         ]
@@ -123,10 +131,13 @@ type Msg
     = PayeePercent String
     | PayeePercentOK
     | HasMetaMask Bool
+    | AccountGot String
     | Ether
+    | SwitchedToPayee
     | RandomInt Int
     | NoEther
     | PayeeAddress String
+    | SettingPercent ()
     | PercentSet ()
     | PercentGot String
     | DoneeName String
@@ -136,6 +147,7 @@ type Msg
     | DoneesOK
     | Balances { payee : String, doneeBalances : List String }
     | Pay
+    | Paying ()
     | Paid ()
 
 
@@ -154,8 +166,8 @@ update msg model =
             if validPercent model.payeePercent then
                 -- payeePercent is valid
                 case model.ether of
+                    -- first time percent is set
                     Nothing ->
-                        -- model.ether is undecided the first time.
                         ( { model
                             | view =
                                 case model.view of
@@ -168,21 +180,9 @@ update msg model =
                         , haveMetaMask ()
                         )
 
+                    -- other times percent is set
                     Just True ->
-                        -- FIXME publish: show user that percent is being set
-                        -- FIXME don't let payer set percent
-                        -- FIXME don't let percent be set while it is being set on the network (two requests at once)
-                        ( { model
-                            | view =
-                                case model.view of
-                                    Payee ->
-                                        EtherOrNot
-
-                                    _ ->
-                                        model.view
-                          }
-                        , setPercent model.payeePercent
-                        )
+                        ( model, getAccount () )
 
                     Just False ->
                         ( { model
@@ -203,25 +203,40 @@ update msg model =
         HasMetaMask trueOrFalse ->
             ( { model | metaMask = Just trueOrFalse }, Cmd.none )
 
+        AccountGot account ->
+            case model.payeeAddress of
+                Just payeeAddress ->
+                    if account == payeeAddress then
+                        ( model, setPercent model.payeePercent )
+                    else
+                        ( model, Cmd.none )
+
+                _ ->
+                    ( model, Cmd.none )
+
         Ether ->
             -- FIXME test-ether: If there's no MetaMask, don't do anything.
             -- FIXME test-ether: "Unlock MetaMask" if you have it but it's locked when it's needed (setPercent)
             -- TODO now explain what's going to happen (ideally you should be able to pass a message for MetaMask to explain what's going on, because the user already trusts MetaMask (e.g. with their private keys)): "set payee's percent on Ethereum (costs Ether, so MetaMask will ask you to confirm)"
             -- TODO requires web3 and test ether: direct user to MetaMask or Parity plugin, faucet if they don't have enough test ether
-            -- FIXME easy change view to "setting percent"
-            -- TODO "use account as payee account" before MetaMask pop-up window
             case model.metaMask of
                 Just True ->
-                    ( { model | view = Payer, ether = Just True }, setPercent model.payeePercent )
+                    ( { model | view = SwitchToPayee, ether = Just True }, Cmd.none )
 
                 _ ->
                     ( model, Cmd.none )
 
+        SwitchedToPayee ->
+            ( { model | view = Payer }, setPercent model.payeePercent )
+
         PayeeAddress address ->
             ( { model | payeeAddress = Just address }, Cmd.none )
 
+        SettingPercent _ ->
+            ( { model | settingPercent = True }, Cmd.none )
+
         PercentSet _ ->
-            ( model
+            ( { model | settingPercent = False }
             , case model.payeeAddress of
                 Just address ->
                     payerGetPercent address
@@ -300,7 +315,7 @@ update msg model =
                 | view =
                     case model.view of
                         Payer ->
-                            All NotPaid
+                            All
 
                         _ ->
                             model.view
@@ -329,7 +344,6 @@ update msg model =
             )
 
         Pay ->
-            -- FIXME don't let payer pay if there's already a payment going through
             case model.ether of
                 Just True ->
                     if model.paying then
@@ -337,8 +351,7 @@ update msg model =
                     else
                         case model.contractPercent of
                             Just _ ->
-                                -- FIXME publish: show that tx is in progress (confirmations)
-                                ( { model | paying = True }, Random.generate RandomInt (Random.int 0 (List.length model.donees - 1)) )
+                                ( model, Random.generate RandomInt (Random.int 0 (List.length model.donees - 1)) )
 
                             Nothing ->
                                 ( model, Cmd.none )
@@ -367,7 +380,7 @@ update msg model =
                                         , payee = model.balances.payee + (payment - donation)
                                         }
                                     , donees = List.map (\donee -> { donee | balance = donee.balance + donation / (List.length model.donees |> toFloat) }) model.donees
-                                    , view = All HasPaid
+                                    , view = All
                                   }
                                 , Cmd.none
                                 )
@@ -398,8 +411,11 @@ update msg model =
                     Cmd.none
             )
 
+        Paying _ ->
+            ( { model | paying = True }, Cmd.none )
+
         Paid _ ->
-            -- FIXME publish: Paying goes to Pay before balances change. Presumably that's because the first confirmation caused paying = False here, but the balances didn't change until a later confirmation, or getting the balance was slow from the first confirmation. QUESTION What's the event where the new balances will be available? If it doesn't work like that, you could stop the Paying button changing to Pay until the balances change. Consider changing Msg.Paid to Msg.Confirmed, to more accurately reflect what's going on.
+            -- FIXME test-ether: Paying goes to Pay before balances change. Presumably that's because the first confirmation caused paying = False here, but the balances didn't change until a later confirmation, or getting the balance was slow from the first confirmation. QUESTION What's the event where the new balances will be available? If it doesn't work like that, you could stop the Paying button changing to Pay until the balances change. Consider changing Msg.Paid to Msg.Confirmed, to more accurately reflect what's going on.
             -- tx means transaction
             ( { model | paying = False }
             , case model.payeeAddress of
@@ -474,14 +490,26 @@ view model =
                             ]
                           -- TODO "payee: [address of selected account]"
                           -- TODO Say that it's only each time you want to change the percent (you don't have to set it for every payment) (2.12 GBP on Rinkeby)
-                          -- FIXME don't pay to set % if it's still the same for that payee
                         , button [ onClick NoEther ] [ text "Not now" ]
                         ]
                     ]
 
+            SwitchToPayee ->
+                div []
+                    [ text "Switch to the payee's account in MetaMask then press OK. "
+                    , button [ onClick SwitchedToPayee ] [ text "OK" ]
+                    ]
+
             Payer ->
                 div []
-                    [ text "The payer chooses what to donate to."
+                    [ text
+                        ((if model.settingPercent then
+                            "Setting percent. "
+                          else
+                            "Percent set. "
+                         )
+                            ++ "The payer chooses what to donate to."
+                        )
                     , div [ style [ ( "display", "flex" ), ( "justify-content", "space-around" ) ] ]
                         [ div []
                             ((List.map
@@ -504,12 +532,12 @@ view model =
                         ]
                     ]
 
-            All paidOrNot ->
+            All ->
                 -- FIXME do away with balances, which run out. Show the values of each transaction and see if that can replace balances. This is especially important when there are multiple donees and you can't see which one's balance changed. You don't want to have to work out which donee was donated to! Clicking Pay again and again won't change anything without balances: the values of the transaction will keep being the same, appearing not to change. So come up with a way to show the transaction happening, so it's clear that the values from the last transaction aren't the ones for the new one. You want the values to persist after the transaction, but not into the new one, so get rid of them when Pay is clicked. That will mean there'll have to be a delay between clicking Pay and seeing the new values, so the old ones have time to leave before the new ones. E.g. If I click Pay again and again , at 1^% I'll just see "0.01 as the donation", and it won't be clear that 0.01 is happen ing again and aiagin too. Balances are less clear what's going on on the initial payment.
                 -- TODO Y shaped
                 div []
                     ([ text
-                        ("The payer makes a payment."
+                        (("The payer makes a payment."
                             ++ case model.ether of
                                 Just True ->
                                     -- FIXME only if on payee's account.
@@ -517,6 +545,11 @@ view model =
 
                                 _ ->
                                     ""
+                         )
+                            ++ if model.settingPercent then
+                                " Setting percent."
+                               else
+                                ""
                         )
                      ]
                         ++ [ div [ style [ ( "display", "flex" ), ( "justify-content", "space-around" ) ] ]
@@ -565,6 +598,7 @@ view model =
                                                     False
                                              )
                                                 || not (validPercent model.payeePercent)
+                                                || model.settingPercent
                                             )
                                         ]
                                         [ text "OK" ]
@@ -585,7 +619,7 @@ view model =
                                         )
                                       -- disables Pay button if there's not >= 1 donee or percent not valid
                                     ]
-                                    -- TODO disable button and "switch to payer's account"
+                                    -- TODO "switch to payer's account" if on payee's account.
                                     -- FIXME randomise payment amount, to show that more is donated when more is paid (for the same donation percent)
                                     [ text
                                         (if model.paying then

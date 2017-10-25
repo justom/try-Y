@@ -1,3 +1,5 @@
+Y: https://github.com/willnwhite/Y
+
 mkdir chain
 testrpc --db chain
 
@@ -14,3 +16,9 @@ npx solcjs Y.sol --abi
 Have to rename ABI file from .abi to .json.
 
 python -m SimpleHTTPServer
+
+## Development
+
+Do as little in JS as possible. Only using JS for web3.
+
+Contract is designed to minimise payAndDonate execution cost at all costs, as it will tend to be the most frequently called function.
